@@ -2,27 +2,35 @@ import type { Insight } from "@/shared";
 import type { Env } from "../types";
 import { mapExpense } from "../lib/mappers";
 
-function todayISO(): string {
-  return new Date().toISOString().split("T")[0];
+// Returns the current time shifted into the client's timezone, so that the
+// UTC date/day/month getters below describe the user's *local* calendar.
+// tzOffsetMin is the value of JS `Date.prototype.getTimezoneOffset()`
+// (i.e. UTC minus local time, in minutes; e.g. -330 for IST).
+function localNow(tzOffsetMin = 0): Date {
+  return new Date(Date.now() - tzOffsetMin * 60000);
 }
 
-function weekStartISO(): string {
-  const d = new Date();
-  const day = d.getDay();
-  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
-  d.setDate(diff);
+function todayISO(tzOffsetMin = 0): string {
+  return localNow(tzOffsetMin).toISOString().split("T")[0];
+}
+
+function weekStartISO(tzOffsetMin = 0): string {
+  const d = localNow(tzOffsetMin);
+  const day = d.getUTCDay();
+  const diff = d.getUTCDate() - day + (day === 0 ? -6 : 1);
+  d.setUTCDate(diff);
   return d.toISOString().split("T")[0];
 }
 
-function monthStartISO(): string {
-  const d = new Date();
-  return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split("T")[0];
+function monthStartISO(tzOffsetMin = 0): string {
+  const d = localNow(tzOffsetMin);
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString().split("T")[0];
 }
 
-export async function getDashboardData(env: Env, userId: string) {
-  const today = todayISO();
-  const weekStart = weekStartISO();
-  const monthStart = monthStartISO();
+export async function getDashboardData(env: Env, userId: string, tzOffsetMin = 0) {
+  const today = todayISO(tzOffsetMin);
+  const weekStart = weekStartISO(tzOffsetMin);
+  const monthStart = monthStartISO(tzOffsetMin);
 
   const [todayRow, weekRow, monthRow, lifetimeRow, topCat, recent, trend, topCats, summary] =
     await Promise.all([
@@ -75,7 +83,7 @@ export async function getDashboardData(env: Env, userId: string) {
       ).bind(userId, monthStart).first<{ count: number; total: number; avg_amount: number }>(),
     ]);
 
-  const daysInMonth = new Date().getDate();
+  const daysInMonth = localNow(tzOffsetMin).getUTCDate();
   const data = {
     cards: {
       todaySpending: todayRow?.total ?? 0,
@@ -230,43 +238,64 @@ export async function generateInsights(env: Env, userId: string): Promise<Insigh
   return insights;
 }
 
-export async function getReportData(env: Env, userId: string) {
-  const [highestDay, avgDaily, avgMonthly, topCategories, monthlySummary, insights] =
+function parseDateUTC(s: string): number {
+  const [y, m, d] = s.split("-").map(Number);
+  return Date.UTC(y, (m ?? 1) - 1, d ?? 1);
+}
+
+export async function getReportData(env: Env, userId: string, dateFrom?: string, dateTo?: string) {
+  const today = todayISO();
+  const from = dateFrom || monthStartISO();
+  const to = dateTo || today;
+
+  const [highestDay, totalRow, topCategories, monthlySummary, insights] =
     await Promise.all([
       env.DB.prepare(
         `SELECT expense_date as date, SUM(amount) as amount FROM expenses
-         WHERE user_id = ? GROUP BY expense_date ORDER BY amount DESC LIMIT 1`
-      ).bind(userId).first<{ date: string; amount: number }>(),
+         WHERE user_id = ? AND expense_date >= ? AND expense_date <= ?
+         GROUP BY expense_date ORDER BY amount DESC LIMIT 1`
+      ).bind(userId, from, to).first<{ date: string; amount: number }>(),
 
       env.DB.prepare(
-        "SELECT COALESCE(AVG(daily_total), 0) as avg FROM (SELECT SUM(amount) as daily_total FROM expenses WHERE user_id = ? GROUP BY expense_date)"
-      ).bind(userId).first<{ avg: number }>(),
-
-      env.DB.prepare(
-        `SELECT COALESCE(AVG(monthly_total), 0) as avg FROM (
-           SELECT strftime('%Y-%m', expense_date) as m, SUM(amount) as monthly_total
-           FROM expenses WHERE user_id = ? GROUP BY m
-         )`
-      ).bind(userId).first<{ avg: number }>(),
+        `SELECT COALESCE(SUM(amount), 0) as total, COUNT(*) as count FROM expenses
+         WHERE user_id = ? AND expense_date >= ? AND expense_date <= ?`
+      ).bind(userId, from, to).first<{ total: number; count: number }>(),
 
       env.DB.prepare(
         `SELECT c.name, c.color, SUM(e.amount) as amount FROM expenses e
-         JOIN categories c ON e.category_id = c.id WHERE e.user_id = ?
+         JOIN categories c ON e.category_id = c.id
+         WHERE e.user_id = ? AND e.expense_date >= ? AND e.expense_date <= ?
          GROUP BY c.id ORDER BY amount DESC LIMIT 5`
-      ).bind(userId).all(),
+      ).bind(userId, from, to).all(),
 
       env.DB.prepare(
         `SELECT strftime('%Y-%m', expense_date) as month, SUM(amount) as amount, COUNT(*) as count
-         FROM expenses WHERE user_id = ? GROUP BY month ORDER BY month DESC LIMIT 12`
-      ).bind(userId).all(),
+         FROM expenses WHERE user_id = ? AND expense_date >= ? AND expense_date <= ?
+         GROUP BY month ORDER BY month DESC LIMIT 12`
+      ).bind(userId, from, to).all(),
 
       generateInsights(env, userId),
     ]);
 
+  const total = totalRow?.total ?? 0;
+  // Cap the end of the range at today so averages divide by elapsed days only.
+  const cappedTo = to > today ? today : to;
+  const dayCount = Math.max(
+    1,
+    Math.round((parseDateUTC(cappedTo) - parseDateUTC(from)) / 86400000) + 1
+  );
+  const [fy, fm] = from.split("-").map(Number);
+  const [ty, tm] = cappedTo.split("-").map(Number);
+  const monthCount = Math.max(1, (ty - fy) * 12 + (tm - fm) + 1);
+
   return {
+    dateFrom: from,
+    dateTo: to,
+    totalSpending: total,
+    transactionCount: totalRow?.count ?? 0,
     highestExpenseDay: highestDay ?? null,
-    averageDailySpending: avgDaily?.avg ?? 0,
-    averageMonthlySpending: avgMonthly?.avg ?? 0,
+    averageDailySpending: total / dayCount,
+    averageMonthlySpending: total / monthCount,
     topCategories: (topCategories.results ?? []).map((r) => ({
       name: (r as Record<string, string>).name,
       amount: (r as Record<string, number>).amount,

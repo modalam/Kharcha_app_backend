@@ -86,6 +86,10 @@ export interface Insight {
 }
 
 export interface ReportData {
+  dateFrom: string;
+  dateTo: string;
+  totalSpending: number;
+  transactionCount: number;
   highestExpenseDay: { date: string; amount: number } | null;
   averageDailySpending: number;
   averageMonthlySpending: number;

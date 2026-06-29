@@ -20,7 +20,8 @@ function monthStartISO(): string {
 const dashboard = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 dashboard.use("*", authMiddleware);
 dashboard.get("/", async (c) => {
-  const data = await getDashboardData(c.env, c.get("userId"));
+  const tz = Number.parseInt(c.req.query("tz") ?? "", 10);
+  const data = await getDashboardData(c.env, c.get("userId"), Number.isFinite(tz) ? tz : 0);
   return c.json(data);
 });
 
@@ -50,7 +51,12 @@ analytics.get("/payment-methods", async (c) => {
 const reports = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 reports.use("*", authMiddleware);
 reports.get("/", async (c) => {
-  const data = await getReportData(c.env, c.get("userId"));
+  const data = await getReportData(
+    c.env,
+    c.get("userId"),
+    c.req.query("dateFrom") || undefined,
+    c.req.query("dateTo") || undefined
+  );
   return c.json(data);
 });
 
@@ -110,10 +116,16 @@ exportRoutes.get("/excel", async (c) => {
 
 exportRoutes.get("/pdf", async (c) => {
   const userId = c.get("userId");
-  const rows = await getExpensesForExport(c.env, userId, getFilters(c));
-  const report = await getReportData(c.env, userId);
+  const filters = getFilters(c);
+  const rows = await getExpensesForExport(c.env, userId, filters);
+  const report = await getReportData(c.env, userId, filters.dateFrom || undefined, filters.dateTo || undefined);
 
   const total = rows.reduce((sum, r) => sum + ((r as Record<string, number>).amount ?? 0), 0);
+  const esc = (v: unknown) =>
+    String(v ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
   const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
   body { font-family: Arial, sans-serif; padding: 40px; color: #1f2937; }
@@ -131,12 +143,12 @@ exportRoutes.get("/pdf", async (c) => {
     <div class="card"><h3>Avg Daily</h3><p>₹${Math.round(report.averageDailySpending).toLocaleString("en-IN")}</p></div>
     <div class="card"><h3>Transactions</h3><p>${rows.length}</p></div>
   </div>
-  <table><thead><tr><th>Date</th><th>Title</th><th>Amount</th><th>Category</th><th>Payment</th></tr></thead>
+  <table><thead><tr><th>Date</th><th>Title</th><th>Amount</th><th>Category</th><th>Subcategory</th><th>Payment</th><th>Notes</th></tr></thead>
   <tbody>${rows.map((r) => {
     const row = r as Record<string, unknown>;
-    return `<tr><td>${row.expense_date}</td><td>${row.title}</td><td>₹${row.amount}</td><td>${row.category_name ?? ""}</td><td>${row.payment_method ?? ""}</td></tr>`;
+    return `<tr><td>${esc(row.expense_date)}</td><td>${esc(row.title)}</td><td>₹${esc(row.amount)}</td><td>${esc(row.category_name)}</td><td>${esc(row.subcategory)}</td><td>${esc(row.payment_method)}</td><td>${esc(row.notes)}</td></tr>`;
   }).join("")}</tbody></table>
-  ${report.insights.length ? `<h2>Insights</h2><ul>${report.insights.map((i) => `<li>${i.message}</li>`).join("")}</ul>` : ""}
+  ${report.insights.length ? `<h2>Insights</h2><ul>${report.insights.map((i) => `<li>${esc(i.message)}</li>`).join("")}</ul>` : ""}
 </body></html>`;
 
   return new Response(html, {
