@@ -62,6 +62,10 @@ export const duplicateExpenseSchema = z.object({
   expenseDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
 });
 
+export const bulkCreateExpenseSchema = z.object({
+  expenses: z.array(createExpenseSchema).min(1, "At least one expense is required").max(500, "Max 500 expenses per import"),
+});
+
 export type CreateExpenseInput = z.infer<typeof createExpenseSchema>;
 export type UpdateExpenseInput = z.infer<typeof updateExpenseSchema>;
 export type ExpenseQueryInput = z.infer<typeof expenseQuerySchema>;

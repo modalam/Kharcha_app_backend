@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import {
   bulkDeleteSchema,
+  bulkCreateExpenseSchema,
   createExpenseSchema,
   duplicateExpenseSchema,
   expenseQuerySchema,
@@ -170,6 +171,37 @@ expenses.post("/", zValidator("json", createExpenseSchema), async (c) => {
 
   const row = await c.env.DB.prepare(`${EXPENSE_SELECT} WHERE e.id = ?`).bind(id).first();
   return c.json(mapExpense(row as Record<string, unknown>), 201);
+});
+
+expenses.post("/bulk", zValidator("json", bulkCreateExpenseSchema), async (c) => {
+  const userId = c.get("userId");
+  const { expenses: items } = c.req.valid("json");
+  const ts = nowISO();
+
+  const insertStmt = c.env.DB.prepare(
+    `INSERT INTO expenses (id, user_id, category_id, title, amount, expense_date, subcategory, notes, payment_method, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+
+  const operations = items.map((item) =>
+    insertStmt.bind(
+      newId(),
+      userId,
+      item.categoryId,
+      item.title,
+      item.amount,
+      item.expenseDate,
+      item.subcategory ?? null,
+      item.notes ?? null,
+      item.paymentMethod ?? null,
+      ts,
+      ts
+    )
+  );
+
+  await c.env.DB.batch(operations);
+
+  return c.json({ message: "Expenses imported", count: items.length }, 201);
 });
 
 expenses.put("/:id", zValidator("json", updateExpenseSchema), async (c) => {
